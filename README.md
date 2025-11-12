@@ -264,6 +264,7 @@ yale jobs ocr <source> <output> [options]
   --dataset-path PATH              # Use existing dataset on cluster (skips upload)
   --max-model-len N                # Maximum model context length (default: 32768)
   --max-tokens N                   # Maximum output tokens (default: 16384)
+  --hpc-process                    # Process data on HPC (copy raw data first)
   --wait                           # Wait for completion
 
 # Check status
@@ -330,6 +331,81 @@ yale jobs ocr scans.pdf layout-only-output \
 - **Layout-all mode**: May need 32768+ for complex/large images (default)
 - **Error "decoder prompt too long"**: Increase `--max-model-len` (e.g., 49152 or 65536)
 - DoTS.ocr supports up to ~128K tokens depending on available GPU memory
+
+### Processing IIIF Manifest Lists
+
+Process multiple IIIF manifests from a text file:
+
+```bash
+# Create a text file with manifest URLs (one per line)
+cat > manifests.txt <<EOF
+https://collections.library.yale.edu/manifests/11781249
+https://collections.library.yale.edu/manifests/11781250
+https://collections.library.yale.edu/manifests/11781251
+EOF
+
+# Default: Downloads images locally, then uploads dataset to cluster
+yale jobs ocr manifests.txt output \
+    --batch-size 16 \
+    --gpus h200:1 \
+    --partition gpu_h200
+
+# With --hpc-process: Downloads images ON THE CLUSTER (recommended!)
+yale jobs ocr manifests.txt output \
+    --source-type iiif-list \
+    --hpc-process \
+    --batch-size 16 \
+    --gpus h200:1 \
+    --partition gpu_h200
+```
+
+**Without `--hpc-process` (default):**
+1. Load IIIF manifests on your local machine
+2. Download images from IIIF servers to your local machine
+3. Convert to HuggingFace dataset locally
+4. Upload entire dataset to cluster
+5. Run OCR
+
+**With `--hpc-process` (recommended for IIIF):**
+1. Upload manifest list to cluster
+2. Cluster loads IIIF manifests
+3. **Cluster downloads images directly from IIIF servers** (faster, doesn't use your bandwidth!)
+4. Cluster converts to HuggingFace dataset
+5. Run OCR
+
+💡 **Always use `--hpc-process` with IIIF manifests** - the cluster has better bandwidth to IIIF servers!
+
+### HPC Data Processing
+
+For large datasets or when bandwidth is limited, process data on the cluster instead of locally:
+
+```bash
+# Process PDF on HPC (copies raw PDF, processes there)
+yale jobs ocr large-document.pdf output \
+    --source-type pdf \
+    --hpc-process \
+    --gpus h200:1 \
+    --partition gpu_h200
+
+# Process directory of images on HPC
+yale jobs ocr /local/images/ output \
+    --source-type directory \
+    --hpc-process
+```
+
+**How `--hpc-process` works:**
+1. **Without flag** (default): Data is processed locally, converted to HuggingFace Dataset, then uploaded
+2. **With flag**: Raw data is copied to cluster, preprocessing script runs there, then OCR runs
+
+**When to use:**
+- ✅ **IIIF manifests** (cluster has better bandwidth to IIIF servers!)
+- ✅ Large PDFs or image directories (faster than local processing + upload)
+- ✅ Slow local connection to cluster
+- ✅ Want to leverage cluster's faster processing
+
+**When NOT to use:**
+- ❌ Small datasets (local processing is fine)
+- ❌ HuggingFace datasets (already remote)
 
 ### Reusing Existing Datasets
 

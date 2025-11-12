@@ -237,12 +237,7 @@ class ClusterConnection:
         if not self.ssh_client:
             raise ConnectionError("Not connected to cluster. Call connect() first.")
         
-        # Get conda environment if specified and prepend it BEFORE executing
-        env = self.config.get('env')
-        if env and 'conda activate' not in command:
-            # Prepend conda activation
-            command = f"source ~/.bashrc && conda activate {env} && {command}"
-        
+        # Note: We use uv for Python dependency management, so no conda activation needed
         logger.debug(f"Executing: {command}")
         
         stdin, stdout, stderr = self.ssh_client.exec_command(command, timeout=timeout)
@@ -287,17 +282,39 @@ class ClusterConnection:
             raise ConnectionError("SFTP not initialized. Call connect() first.")
         
         local_path = Path(local_dir)
+        logger.info(f"Uploading directory: {local_path} -> {remote_dir}")
+        
+        # First, ensure the base remote directory exists
+        self._ensure_remote_directory(remote_dir)
+        
+        # Collect all unique subdirectories that need to be created
+        subdirs = set()
+        files_to_upload = []
         
         for item in local_path.rglob('*'):
             if item.is_file():
                 rel_path = item.relative_to(local_path)
                 remote_file = os.path.join(remote_dir, str(rel_path))
-                
-                # Ensure directory exists
                 remote_file_dir = str(Path(remote_file).parent)
-                self._ensure_remote_directory(remote_file_dir)
                 
-                self.sftp_client.put(str(item), remote_file)
+                if remote_file_dir != remote_dir:
+                    subdirs.add(remote_file_dir)
+                
+                files_to_upload.append((str(item), remote_file))
+        
+        # Create all subdirectories first
+        logger.info(f"Creating {len(subdirs)} subdirectories...")
+        for subdir in sorted(subdirs):
+            self._ensure_remote_directory(subdir)
+        
+        # Upload all files
+        logger.info(f"Uploading {len(files_to_upload)} files...")
+        for local_file, remote_file in files_to_upload:
+            try:
+                self.sftp_client.put(local_file, remote_file)
+            except Exception as e:
+                logger.error(f"Failed to upload {local_file} to {remote_file}: {e}")
+                raise
     
     def download_file(self, remote_path: str, local_path: str):
         """Download a file from the cluster.
@@ -325,9 +342,33 @@ class ClusterConnection:
         """
         try:
             self.sftp_client.stat(remote_dir)
+            # Directory exists, we're good
+            return
         except FileNotFoundError:
-            # Directory doesn't exist, create it
-            self.execute_command(f"mkdir -p {remote_dir}")
+            pass  # Directory doesn't exist, need to create it
+        
+        # Create directory via SSH
+        result = self.execute_command(f"mkdir -p '{remote_dir}' && echo 'SUCCESS'")
+        
+        # Check if command succeeded
+        if result['exit_code'] != 0:
+            raise RuntimeError(f"Failed to create directory: {remote_dir}. Error: {result['stderr']}")
+        
+        if 'SUCCESS' not in result['stdout']:
+            raise RuntimeError(f"Failed to create directory: {remote_dir}. No SUCCESS in output")
+        
+        # Verify it was created by trying to stat it again
+        max_retries = 3
+        for i in range(max_retries):
+            try:
+                self.sftp_client.stat(remote_dir)
+                return  # Success!
+            except FileNotFoundError:
+                if i < max_retries - 1:
+                    import time
+                    time.sleep(0.5)  # Wait a bit and retry
+                else:
+                    raise RuntimeError(f"Directory created but not accessible: {remote_dir}")
     
     def list_directory(self, remote_dir: str) -> List[str]:
         """List contents of a remote directory.

@@ -40,11 +40,15 @@ def cmd_run(args):
 
 def cmd_ocr(args):
     """Run an OCR job."""
+    # Use custom_prompt if provided, otherwise use prompt_mode
+    prompt_to_use = args.custom_prompt if args.custom_prompt else args.prompt_mode
+    
     job = run_ocr_job(
         data_source=args.data_source,
         output_dataset=args.output,
         source_type=args.source_type,
         model=args.model,
+        ocr_engine=args.ocr_engine,
         batch_size=args.batch_size,
         max_samples=args.max_samples,
         job_name=args.job_name,
@@ -52,10 +56,13 @@ def cmd_ocr(args):
         partition=args.partition,
         time_limit=args.time,
         env=args.env,
-        prompt_mode=args.prompt_mode,
+        prompt_mode=prompt_to_use,
+        output_column=args.output_column,
         dataset_path=args.dataset_path,
         max_model_len=args.max_model_len,
         max_tokens=args.max_tokens,
+        max_resolution=args.max_resolution,
+        hpc_process=args.hpc_process,
         wait=args.wait,
         config_path=args.config,
     )
@@ -131,8 +138,21 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run OCR on PDFs
+  # Run OCR on PDFs with DoTS.ocr (default)
   yale jobs ocr path/to/pdfs output-dataset --source-type pdf --gpus v100:2
+  
+  # Run OCR with Nanonets-OCR2
+  yale jobs ocr manifests.txt output --ocr-engine nanonets2-ocr --gpus h200:1
+  
+  # Run OCR with Qwen3-VL
+  yale jobs ocr path/to/images output --ocr-engine qwen3-vl --source-type directory
+  
+  # Run OCR with Qwen3-VL and custom prompt
+  yale jobs ocr manifests.txt output --ocr-engine qwen3-vl \\
+      --custom-prompt "Extract all text from this document"
+  
+  # Run OCR with DeepSeek OCR
+  yale jobs ocr path/to/images output --ocr-engine deepseek-ocr --source-type directory
   
   # Run OCR on IIIF manifest
   yale jobs ocr https://example.com/manifest.json output --source-type iiif
@@ -179,18 +199,21 @@ Examples:
     
     # OCR command
     ocr_parser = jobs_subparsers.add_parser('ocr', help='Run OCR job')
-    ocr_parser.add_argument('data_source', help='Data source (PDF, IIIF, directory, etc.)')
+    ocr_parser.add_argument('data_source', help='Data source (PDF, IIIF, .txt file with manifests, directory, etc.)')
     ocr_parser.add_argument('output', help='Output dataset name')
     ocr_parser.add_argument('--source-type', default='auto',
-                           choices=['auto', 'pdf', 'iiif', 'web', 'directory', 'hf'],
+                           choices=['auto', 'pdf', 'iiif', 'iiif-list', 'web', 'directory', 'hf'],
                            help='Type of data source')
     ocr_parser.add_argument('--model', default='rednote-hilab/dots.ocr',
-                           help='OCR model to use')
+                           help='OCR model to use (default: rednote-hilab/dots.ocr)')
+    ocr_parser.add_argument('--ocr-engine', default='dots-ocr',
+                           choices=['dots-ocr', 'nanonets2-ocr', 'deepseek-ocr', 'qwen3-vl'],
+                           help='OCR engine/script to use (default: dots-ocr)')
     ocr_parser.add_argument('--batch-size', type=int, default=16,
                            help='Batch size for processing')
     ocr_parser.add_argument('--max-samples', type=int,
                            help='Maximum number of samples to process')
-    ocr_parser.add_argument('--job-name', default='yale-ocr', help='Job name')
+    ocr_parser.add_argument('--job-name', default='yale-job', help='Job name')
     ocr_parser.add_argument('--gpus', default='p100:2', help='GPU specification')
     ocr_parser.add_argument('--partition', default='gpu', help='SLURM partition (default: gpu)')
     ocr_parser.add_argument('--time', default='02:00:00', help='Time limit (HH:MM:SS, default: 02:00:00)')
@@ -198,11 +221,19 @@ Examples:
     ocr_parser.add_argument('--prompt-mode', default='layout-all',
                            choices=['ocr', 'layout-all', 'layout-only'],
                            help='DoTS.ocr prompt mode (default: layout-all)')
+    ocr_parser.add_argument('--custom-prompt',
+                           help='Custom prompt for vision models like Qwen3-VL (overrides prompt-mode)')
+    ocr_parser.add_argument('--output-column', default='text',
+                           help='Output column name for results (default: text)')
     ocr_parser.add_argument('--dataset-path', help='Path to existing dataset on cluster (skips data upload)')
     ocr_parser.add_argument('--max-model-len', type=int, default=32768,
                            help='Maximum model context length (default: 32768)')
     ocr_parser.add_argument('--max-tokens', type=int, default=16384,
                            help='Maximum output tokens (default: 16384)')
+    ocr_parser.add_argument('--max-resolution', type=int, default=2000,
+                           help='Maximum image resolution (width/height in pixels, default: 2000)')
+    ocr_parser.add_argument('--hpc-process', action='store_true',
+                           help='Process data on HPC (copy raw data first instead of processing locally)')
     ocr_parser.add_argument('--wait', action='store_true', help='Wait for completion')
     ocr_parser.set_defaults(func=cmd_ocr)
     
@@ -247,7 +278,10 @@ Examples:
         try:
             args.func(args)
         except Exception as e:
+            import traceback
             logger.error(f"Error: {e}")
+            logger.error("Full traceback:")
+            logger.error(traceback.format_exc())
             sys.exit(1)
     else:
         parser.print_help()
